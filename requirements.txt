@@ -1,0 +1,21 @@
+# ============================================
+# Dependencias del Chatbot DMC
+# ============================================
+
+# LangChain (framework principal)
+langchain>=0.1.0
+langchain-openai>=0.0.5
+langchain-community>=0.0.20
+
+# OpenAI (LLM y Embeddings)
+openai>=1.0.0
+
+# ChromaDB (Base de datos vectorial)
+chromadb>=0.4.0
+
+# Lectura de PDFs
+pypdf>=3.17.0
+
+# Utilidades
+python-dotenv==1.0.0
+numpy>=1.24.0
