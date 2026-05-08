@@ -1,279 +1,211 @@
 """
-Chatbot RAG para DMC Institute
-Usa LCEL (LangChain Expression Language) con paquetes modulares.
-Compatible con LangChain v1.0+
+Módulo de Indexación de Documentos
+Carga PDFs, los divide en chunks, genera embeddings y los almacena en ChromaDB.
+Usa paquetes modulares de LangChain (compatibles con v1.0+).
 """
 from typing import List, Dict
-from langchain_openai import ChatOpenAI
-from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
-from langchain_core.messages import HumanMessage, AIMessage
-from langchain_core.output_parsers import StrOutputParser
-from langchain_core.runnables import RunnablePassthrough
-from indexer import DocumentIndexer
+from langchain_community.document_loaders import PyPDFDirectoryLoader
+from langchain_text_splitters import RecursiveCharacterTextSplitter
+from langchain_openai import OpenAIEmbeddings
+from langchain_chroma import Chroma
 from config import Config
 import warnings
+import os
+import shutil
 
 warnings.filterwarnings('ignore')
 
 
-class ChatbotDMC:
+class DocumentIndexer:
     """
-    Chatbot inteligente para DMC Institute.
-    Usa RAG (Retrieval-Augmented Generation) para responder
-    preguntas basándose en documentos reales de DMC.
+    Indexador de documentos para el chatbot de DMC.
+    Carga PDFs, los procesa en chunks y los almacena en ChromaDB.
     """
 
     def __init__(self):
-        """Inicializa el chatbot con todos sus componentes"""
-        print("=" * 60)
-        print("INICIALIZANDO CHATBOT DMC")
-        print("=" * 60 + "\n")
+        """Inicializa el indexador con embeddings de OpenAI"""
+        print("Inicializando indexador de documentos...")
 
         if not Config.OPENAI_API_KEY or Config.OPENAI_API_KEY == "tu-api-key-aqui":
-            raise ValueError("API Key no configurada. Edita .env con tu OPENAI_API_KEY")
+            raise ValueError(
+                "API Key de OpenAI no configurada. "
+                "Edita el archivo .env y agrega tu OPENAI_API_KEY"
+            )
 
-        # 1. Indexador de documentos
-        self.indexer = DocumentIndexer()
-
-        # 2. Modelo LLM
-        self.llm = ChatOpenAI(
-            model=Config.LLM_MODEL,
-            temperature=Config.LLM_TEMPERATURE,
-            max_tokens=Config.LLM_MAX_TOKENS,
+        # Modelo de embeddings
+        self.embeddings = OpenAIEmbeddings(
+            model=Config.EMBEDDING_MODEL,
             openai_api_key=Config.OPENAI_API_KEY
         )
 
-        # 3. Historial de conversación (lista de mensajes)
-        self.chat_history: List = []
-
-        # 4. Retriever y chain (se crean después de indexar)
-        self.retriever = None
-        self.chain = None
-
-        # 5. Historial para mostrar
-        self.history = []
-
-        print("✓ Chatbot DMC inicializado\n")
-
-    def setup(self, pdf_folder: str = None, force_reindex: bool = False):
-        """
-        Configura el chatbot: indexa documentos y crea la chain RAG.
-        """
-        # Intentar cargar vector store existente
-        vector_store = None
-        if not force_reindex:
-            vector_store = self.indexer.load_existing_store()
-
-        # Si no existe, indexar
-        if not vector_store:
-            vector_store = self.indexer.index_pdfs(pdf_folder)
-
-        if not vector_store:
-            raise RuntimeError("No se pudo crear el vector store")
-
-        # Crear retriever
-        self.retriever = vector_store.as_retriever(
-            search_type="similarity",
-            search_kwargs={"k": Config.DEFAULT_TOP_K}
+        # Text splitter
+        self.text_splitter = RecursiveCharacterTextSplitter(
+            chunk_size=Config.CHUNK_SIZE,
+            chunk_overlap=Config.CHUNK_OVERLAP,
+            length_function=len,
         )
 
-        # Crear prompt RAG
-        prompt = ChatPromptTemplate.from_messages([
-            ("system", Config.SYSTEM_PROMPT + "\n\nContexto de documentos DMC:\n{context}"),
-            MessagesPlaceholder(variable_name="chat_history"),
-            ("human", "{question}")
-        ])
+        self.vector_store = None
 
-        # Función para formatear los documentos recuperados
-        def format_docs(docs):
-            return "\n\n".join(doc.page_content for doc in docs)
+        print(f"✓ Embeddings: {Config.EMBEDDING_MODEL}")
+        print(f"✓ Chunk size: {Config.CHUNK_SIZE}, Overlap: {Config.CHUNK_OVERLAP}")
+        print("✓ Indexador inicializado\n")
 
-        # Crear chain con LCEL
-        self.chain = (
-            RunnablePassthrough.assign(
-                context=lambda x: format_docs(self.retriever.invoke(x["question"]))
-            )
-            | prompt
-            | self.llm
-            | StrOutputParser()
+    def load_pdfs(self, pdf_folder: str = None) -> list:
+        """Carga todos los PDFs de una carpeta"""
+        folder = pdf_folder or Config.PDF_FOLDER
+
+        if not os.path.exists(folder):
+            print(f"❌ La carpeta '{folder}' no existe")
+            return []
+
+        print(f"Cargando PDFs desde: {folder}")
+
+        loader = PyPDFDirectoryLoader(folder)
+        documents = loader.load()
+
+        if not documents:
+            print("❌ No se encontraron PDFs o no tienen texto")
+            return []
+
+        print(f"✓ {len(documents)} páginas cargadas")
+
+        archivos = set()
+        for doc in documents:
+            source = doc.metadata.get("source", "desconocido")
+            archivos.add(os.path.basename(source))
+        print(f"✓ Archivos: {', '.join(archivos)}")
+
+        return documents
+
+    def split_documents(self, documents: list) -> list:
+        """Divide documentos en chunks"""
+        print(f"\nDividiendo {len(documents)} documentos en chunks...")
+        chunks = self.text_splitter.split_documents(documents)
+        print(f"✓ {len(chunks)} chunks creados")
+        return chunks
+
+    def create_vector_store(self, chunks: list) -> Chroma:
+        """Crea el vector store en ChromaDB"""
+        print(f"\nCreando vector store en ChromaDB...")
+
+        self.vector_store = Chroma.from_documents(
+            documents=chunks,
+            embedding=self.embeddings,
+            collection_name=Config.CHROMA_COLLECTION_NAME,
+            persist_directory=Config.CHROMA_PERSIST_DIR
         )
 
-        print("✓ Chain RAG configurada y lista\n")
+        print(f"✓ Vector store creado con {len(chunks)} documentos")
+        return self.vector_store
 
-    def chat(self, user_message: str) -> Dict:
-        """
-        Procesa un mensaje del usuario y genera una respuesta.
-        """
-        if not self.chain:
-            return {
-                "answer": "❌ El chatbot no está configurado. Ejecuta setup() primero.",
-                "sources": [],
-                "error": True
-            }
+    def index_pdfs(self, pdf_folder: str = None) -> Chroma:
+        """Pipeline completo: Carga PDFs → Chunks → ChromaDB"""
+        print("=" * 60)
+        print("INDEXACIÓN DE DOCUMENTOS")
+        print("=" * 60 + "\n")
 
-        # Validación de seguridad
-        if self._is_unsafe_input(user_message):
-            return {
-                "answer": "No puedo procesar esa solicitud. ¿Puedo ayudarte con información sobre los programas de DMC?",
-                "sources": [],
-                "blocked": True
-            }
+        documents = self.load_pdfs(pdf_folder)
+        if not documents:
+            return None
 
-        try:
-            # Obtener documentos fuente para mostrar
-            source_docs = self.retriever.invoke(user_message)
+        chunks = self.split_documents(documents)
+        vector_store = self.create_vector_store(chunks)
 
-            # Ejecutar la chain RAG
-            answer = self.chain.invoke({
-                "question": user_message,
-                "chat_history": self.chat_history
+        print(f"\n{'=' * 60}")
+        print("✓ INDEXACIÓN COMPLETADA")
+        print(f"{'=' * 60}\n")
+
+        return vector_store
+
+    def load_existing_store(self) -> Chroma:
+        """Carga un vector store existente desde disco"""
+        if not os.path.exists(Config.CHROMA_PERSIST_DIR):
+            return None
+
+        print("Cargando vector store existente...")
+
+        self.vector_store = Chroma(
+            collection_name=Config.CHROMA_COLLECTION_NAME,
+            embedding_function=self.embeddings,
+            persist_directory=Config.CHROMA_PERSIST_DIR
+        )
+
+        count = self.vector_store._collection.count()
+        if count == 0:
+            return None
+
+        print(f"✓ Vector store cargado: {count} documentos")
+        return self.vector_store
+
+    def search(self, query: str, k: int = None) -> List[Dict]:
+        """Búsqueda semántica en el vector store"""
+        if not self.vector_store:
+            print("❌ No hay vector store. Ejecuta index_pdfs() primero.")
+            return []
+
+        k = k or Config.DEFAULT_TOP_K
+        results = self.vector_store.similarity_search_with_score(query=query, k=k)
+
+        formatted = []
+        for doc, score in results:
+            formatted.append({
+                "text": doc.page_content,
+                "score": float(score),
+                "metadata": doc.metadata
             })
+        return formatted
 
-            # Validación de alucinaciones
-            if not source_docs:
-                answer = (
-                    "No encontré información relevante en mis documentos para "
-                    "responder tu pregunta. ¿Puedo ayudarte con algo más sobre "
-                    "los programas de DMC Institute?"
-                )
-
-            # Extraer fuentes
-            sources = []
-            for doc in source_docs:
-                sources.append({
-                    "archivo": doc.metadata.get("source", "N/A"),
-                    "pagina": doc.metadata.get("page", "N/A"),
-                    "texto_preview": doc.page_content[:150] + "..."
-                })
-
-            # Actualizar historial de conversación
-            self.chat_history.append(HumanMessage(content=user_message))
-            self.chat_history.append(AIMessage(content=answer))
-
-            # Guardar en historial legible
-            self.history.append({
-                "user": user_message,
-                "assistant": answer
-            })
-
-            return {
-                "answer": answer,
-                "sources": sources,
-                "error": False
-            }
-
-        except Exception as e:
-            print(f"❌ Error: {str(e)}")
-            return {
-                "answer": "Ocurrió un error al procesar tu pregunta. Intenta de nuevo.",
-                "sources": [],
-                "error": True,
-                "error_detail": str(e)
-            }
-
-    def _is_unsafe_input(self, text: str) -> bool:
-        """Validación básica contra inyecciones de prompt"""
-        unsafe_patterns = [
-            "ignora las instrucciones", "ignore your instructions",
-            "olvida tu rol", "forget your role",
-            "actúa como", "act as",
-            "eres ahora", "you are now",
-            "nuevo prompt", "new prompt",
-            "system prompt",
-        ]
-        text_lower = text.lower().strip()
-        for pattern in unsafe_patterns:
-            if pattern in text_lower:
-                print(f"⚠ Input bloqueado: patrón '{pattern}'")
-                return True
-        return False
-
-    def get_history(self) -> List[Dict]:
-        """Retorna el historial de conversación"""
-        return self.history
-
-    def clear_history(self):
-        """Limpia el historial y la memoria"""
-        self.history = []
-        self.chat_history = []
-        print("✓ Historial limpiado")
+    def delete_store(self):
+        """Elimina el vector store del disco"""
+        if os.path.exists(Config.CHROMA_PERSIST_DIR):
+            shutil.rmtree(Config.CHROMA_PERSIST_DIR)
+            print(f"✓ Vector store eliminado")
+        self.vector_store = None
 
     def get_stats(self) -> Dict:
-        """Retorna estadísticas del chatbot"""
-        indexer_stats = self.indexer.get_stats()
+        """Retorna estadísticas del vector store"""
+        if not self.vector_store:
+            return {"status": "No inicializado", "documents": 0}
+        count = self.vector_store._collection.count()
         return {
-            "llm_model": Config.LLM_MODEL,
-            "temperature": Config.LLM_TEMPERATURE,
-            "messages_count": len(self.history),
-            **indexer_stats
+            "status": "Activo",
+            "documents": count,
+            "collection": Config.CHROMA_COLLECTION_NAME,
+            "embedding_model": Config.EMBEDDING_MODEL
         }
 
 
-# ============================================================================
-# MODO INTERACTIVO
-# ============================================================================
-
 def main():
-    """Demo interactiva del chatbot"""
+    """Demo de indexación y búsqueda"""
     Config.print_config()
 
-    bot = ChatbotDMC()
-    bot.setup()
+    indexer = DocumentIndexer()
+    vector_store = indexer.index_pdfs()
 
-    print("=" * 60)
-    print("CHATBOT DMC - Modo Interactivo")
-    print("=" * 60)
-    print("Escribe tu pregunta sobre DMC Institute.")
-    print("Escribe 'salir' para terminar.")
-    print("Escribe 'historial' para ver el historial.")
-    print("Escribe 'stats' para ver estadísticas.")
-    print("=" * 60 + "\n")
+    if not vector_store:
+        print("No se pudo crear el vector store")
+        return
 
-    while True:
-        try:
-            user_input = input("Tú: ").strip()
-        except (EOFError, KeyboardInterrupt):
-            print("\n\n¡Hasta luego!")
-            break
+    queries = [
+        "¿Qué programas ofrece DMC?",
+        "¿Cuáles son los requisitos para el diploma?",
+        "¿Qué tecnologías se enseñan?",
+    ]
 
-        if not user_input:
-            continue
+    for query in queries:
+        print(f"\n{'=' * 60}")
+        print(f"Query: {query}")
+        print("=" * 60)
 
-        if user_input.lower() == "salir":
-            print("\n¡Gracias por usar el Chatbot de DMC! ¡Hasta pronto!")
-            break
+        results = indexer.search(query, k=3)
+        for i, r in enumerate(results, 1):
+            text_preview = r['text'][:200].replace('\n', ' ')
+            print(f"\n{i}. [Score: {r['score']:.4f}]")
+            print(f"   Fuente: {os.path.basename(r['metadata'].get('source', 'N/A'))}")
+            print(f"   Texto: {text_preview}...")
 
-        if user_input.lower() == "historial":
-            history = bot.get_history()
-            if not history:
-                print("No hay historial aún.\n")
-            else:
-                for i, h in enumerate(history, 1):
-                    print(f"\n--- Mensaje {i} ---")
-                    print(f"Tú: {h['user']}")
-                    print(f"Bot: {h['assistant']}")
-            print()
-            continue
-
-        if user_input.lower() == "stats":
-            stats = bot.get_stats()
-            print("\nEstadísticas:")
-            for k, v in stats.items():
-                print(f"  {k}: {v}")
-            print()
-            continue
-
-        # Enviar mensaje al chatbot
-        response = bot.chat(user_input)
-        print(f"\nBot: {response['answer']}")
-
-        if response.get('sources'):
-            import os
-            print(f"\n  📚 Fuentes consultadas: {len(response['sources'])}")
-            for s in response['sources'][:2]:
-                archivo = os.path.basename(s['archivo'])
-                print(f"     - {archivo} (pág. {s['pagina']})")
-        print()
+    print("\n✓ Demo completada")
 
 
 if __name__ == "__main__":
