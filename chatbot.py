@@ -1,13 +1,14 @@
 """
 Chatbot RAG para DMC Institute
-Integra búsqueda semántica (ChromaDB) con generación de respuestas (OpenAI LLM).
-Implementa manejo básico de alucinaciones y seguridad.
+Usa LCEL (LangChain Expression Language) con paquetes modulares.
+Compatible con LangChain v1.0+
 """
 from typing import List, Dict
 from langchain_openai import ChatOpenAI
-from langchain.chains import ConversationalRetrievalChain
-from langchain.memory import ConversationBufferMemory
-from langchain.prompts import PromptTemplate
+from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
+from langchain_core.messages import HumanMessage, AIMessage
+from langchain_core.output_parsers import StrOutputParser
+from langchain_core.runnables import RunnablePassthrough
 from indexer import DocumentIndexer
 from config import Config
 import warnings
@@ -28,31 +29,25 @@ class ChatbotDMC:
         print("INICIALIZANDO CHATBOT DMC")
         print("=" * 60 + "\n")
 
-        # Validar API Key
         if not Config.OPENAI_API_KEY or Config.OPENAI_API_KEY == "tu-api-key-aqui":
-            raise ValueError(
-                "API Key no configurada. Edita .env con tu OPENAI_API_KEY"
-            )
+            raise ValueError("API Key no configurada. Edita .env con tu OPENAI_API_KEY")
 
-        # 1. Indexador de documentos (embeddings + ChromaDB)
+        # 1. Indexador de documentos
         self.indexer = DocumentIndexer()
 
-        # 2. Modelo LLM para generación de respuestas
+        # 2. Modelo LLM
         self.llm = ChatOpenAI(
-            model_name=Config.LLM_MODEL,
+            model=Config.LLM_MODEL,
             temperature=Config.LLM_TEMPERATURE,
             max_tokens=Config.LLM_MAX_TOKENS,
             openai_api_key=Config.OPENAI_API_KEY
         )
 
-        # 3. Memoria de conversación
-        self.memory = ConversationBufferMemory(
-            memory_key="chat_history",
-            return_messages=True,
-            output_key="answer"
-        )
+        # 3. Historial de conversación (lista de mensajes)
+        self.chat_history: List = []
 
-        # 4. Chain de RAG (se crea después de indexar)
+        # 4. Retriever y chain (se crean después de indexar)
+        self.retriever = None
         self.chain = None
 
         # 5. Historial para mostrar
@@ -62,11 +57,7 @@ class ChatbotDMC:
 
     def setup(self, pdf_folder: str = None, force_reindex: bool = False):
         """
-        Configura el chatbot: indexa documentos y crea la chain de RAG.
-
-        Args:
-            pdf_folder: Carpeta con PDFs
-            force_reindex: Si True, re-indexa aunque ya exista
+        Configura el chatbot: indexa documentos y crea la chain RAG.
         """
         # Intentar cargar vector store existente
         vector_store = None
@@ -80,38 +71,31 @@ class ChatbotDMC:
         if not vector_store:
             raise RuntimeError("No se pudo crear el vector store")
 
-        # Crear retriever a partir del vector store
-        retriever = vector_store.as_retriever(
+        # Crear retriever
+        self.retriever = vector_store.as_retriever(
             search_type="similarity",
             search_kwargs={"k": Config.DEFAULT_TOP_K}
         )
 
-        # Prompt personalizado para el QA
-        qa_prompt = PromptTemplate(
-            template="""
-{system_prompt}
+        # Crear prompt RAG
+        prompt = ChatPromptTemplate.from_messages([
+            ("system", Config.SYSTEM_PROMPT + "\n\nContexto de documentos DMC:\n{context}"),
+            MessagesPlaceholder(variable_name="chat_history"),
+            ("human", "{question}")
+        ])
 
-Contexto (información de documentos de DMC):
-{context}
+        # Función para formatear los documentos recuperados
+        def format_docs(docs):
+            return "\n\n".join(doc.page_content for doc in docs)
 
-Historial de conversación:
-{chat_history}
-
-Pregunta del usuario: {question}
-
-Respuesta:""",
-            input_variables=["context", "chat_history", "question"],
-            partial_variables={"system_prompt": Config.SYSTEM_PROMPT}
-        )
-
-        # Crear chain de RAG conversacional
-        self.chain = ConversationalRetrievalChain.from_llm(
-            llm=self.llm,
-            retriever=retriever,
-            memory=self.memory,
-            return_source_documents=True,
-            combine_docs_chain_kwargs={"prompt": qa_prompt},
-            verbose=False
+        # Crear chain con LCEL
+        self.chain = (
+            RunnablePassthrough.assign(
+                context=lambda x: format_docs(self.retriever.invoke(x["question"]))
+            )
+            | prompt
+            | self.llm
+            | StrOutputParser()
         )
 
         print("✓ Chain RAG configurada y lista\n")
@@ -119,12 +103,6 @@ Respuesta:""",
     def chat(self, user_message: str) -> Dict:
         """
         Procesa un mensaje del usuario y genera una respuesta.
-
-        Args:
-            user_message: Mensaje/pregunta del usuario
-
-        Returns:
-            Diccionario con respuesta, fuentes y metadata
         """
         if not self.chain:
             return {
@@ -133,7 +111,7 @@ Respuesta:""",
                 "error": True
             }
 
-        # Validación básica de seguridad (anti-inyección)
+        # Validación de seguridad
         if self._is_unsafe_input(user_message):
             return {
                 "answer": "No puedo procesar esa solicitud. ¿Puedo ayudarte con información sobre los programas de DMC?",
@@ -142,26 +120,37 @@ Respuesta:""",
             }
 
         try:
-            # Ejecutar la chain RAG
-            result = self.chain.invoke({"question": user_message})
+            # Obtener documentos fuente para mostrar
+            source_docs = self.retriever.invoke(user_message)
 
-            answer = result.get("answer", "No pude generar una respuesta.")
-            source_docs = result.get("source_documents", [])
+            # Ejecutar la chain RAG
+            answer = self.chain.invoke({
+                "question": user_message,
+                "chat_history": self.chat_history
+            })
+
+            # Validación de alucinaciones
+            if not source_docs:
+                answer = (
+                    "No encontré información relevante en mis documentos para "
+                    "responder tu pregunta. ¿Puedo ayudarte con algo más sobre "
+                    "los programas de DMC Institute?"
+                )
 
             # Extraer fuentes
             sources = []
             for doc in source_docs:
-                source_info = {
+                sources.append({
                     "archivo": doc.metadata.get("source", "N/A"),
                     "pagina": doc.metadata.get("page", "N/A"),
                     "texto_preview": doc.page_content[:150] + "..."
-                }
-                sources.append(source_info)
+                })
 
-            # Validación de alucinaciones básica
-            answer = self._validate_response(answer, source_docs)
+            # Actualizar historial de conversación
+            self.chat_history.append(HumanMessage(content=user_message))
+            self.chat_history.append(AIMessage(content=answer))
 
-            # Guardar en historial
+            # Guardar en historial legible
             self.history.append({
                 "user": user_message,
                 "assistant": answer
@@ -174,8 +163,7 @@ Respuesta:""",
             }
 
         except Exception as e:
-            error_msg = f"Error al procesar la pregunta: {str(e)}"
-            print(f"❌ {error_msg}")
+            print(f"❌ Error: {str(e)}")
             return {
                 "answer": "Ocurrió un error al procesar tu pregunta. Intenta de nuevo.",
                 "sources": [],
@@ -184,67 +172,21 @@ Respuesta:""",
             }
 
     def _is_unsafe_input(self, text: str) -> bool:
-        """
-        Validación básica de seguridad contra inyecciones de prompt.
-
-        Args:
-            text: Texto del usuario
-
-        Returns:
-            True si el input parece malicioso
-        """
-        # Patrones sospechosos
+        """Validación básica contra inyecciones de prompt"""
         unsafe_patterns = [
-            "ignora las instrucciones",
-            "ignore your instructions",
-            "olvida tu rol",
-            "forget your role",
-            "actúa como",
-            "act as",
-            "eres ahora",
-            "you are now",
-            "nuevo prompt",
-            "new prompt",
+            "ignora las instrucciones", "ignore your instructions",
+            "olvida tu rol", "forget your role",
+            "actúa como", "act as",
+            "eres ahora", "you are now",
+            "nuevo prompt", "new prompt",
             "system prompt",
         ]
-
         text_lower = text.lower().strip()
-
         for pattern in unsafe_patterns:
             if pattern in text_lower:
-                print(f"⚠ Input bloqueado por seguridad: patrón '{pattern}'")
+                print(f"⚠ Input bloqueado: patrón '{pattern}'")
                 return True
-
         return False
-
-    def _validate_response(self, answer: str, source_docs: list) -> str:
-        """
-        Validación básica contra alucinaciones.
-        Verifica que la respuesta tenga relación con los documentos fuente.
-
-        Args:
-            answer: Respuesta generada por el LLM
-            source_docs: Documentos fuente usados
-
-        Returns:
-            Respuesta validada
-        """
-        # Si no hay documentos fuente, advertir
-        if not source_docs:
-            return (
-                "No encontré información relevante en mis documentos para "
-                "responder tu pregunta. ¿Puedo ayudarte con algo más sobre "
-                "los programas de DMC Institute?"
-            )
-
-        # Si la respuesta es muy corta, puede ser un fallo
-        if len(answer.strip()) < 10:
-            return (
-                "No pude generar una respuesta adecuada. "
-                "¿Podrías reformular tu pregunta?"
-            )
-
-        return answer
 
     def get_history(self) -> List[Dict]:
         """Retorna el historial de conversación"""
@@ -253,7 +195,7 @@ Respuesta:""",
     def clear_history(self):
         """Limpia el historial y la memoria"""
         self.history = []
-        self.memory.clear()
+        self.chat_history = []
         print("✓ Historial limpiado")
 
     def get_stats(self) -> Dict:
@@ -263,26 +205,21 @@ Respuesta:""",
             "llm_model": Config.LLM_MODEL,
             "temperature": Config.LLM_TEMPERATURE,
             "messages_count": len(self.history),
-            "memory_messages": len(self.memory.chat_memory.messages),
             **indexer_stats
         }
 
 
 # ============================================================================
-# DEMO / PRUEBA
+# MODO INTERACTIVO
 # ============================================================================
 
 def main():
     """Demo interactiva del chatbot"""
     Config.print_config()
 
-    # Crear chatbot
     bot = ChatbotDMC()
-
-    # Configurar (indexar documentos)
     bot.setup()
 
-    # Modo interactivo
     print("=" * 60)
     print("CHATBOT DMC - Modo Interactivo")
     print("=" * 60)
@@ -328,18 +265,14 @@ def main():
 
         # Enviar mensaje al chatbot
         response = bot.chat(user_input)
-
-        # Mostrar respuesta
         print(f"\nBot: {response['answer']}")
 
-        # Mostrar fuentes (opcional)
         if response.get('sources'):
+            import os
             print(f"\n  📚 Fuentes consultadas: {len(response['sources'])}")
-            for s in response['sources'][:2]:  # Mostrar máximo 2 fuentes
-                import os
+            for s in response['sources'][:2]:
                 archivo = os.path.basename(s['archivo'])
                 print(f"     - {archivo} (pág. {s['pagina']})")
-
         print()
 
 
