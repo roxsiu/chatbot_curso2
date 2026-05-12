@@ -48,8 +48,8 @@ Usuario → Validación de seguridad → Búsqueda semántica (ChromaDB) → LLM
 ### 1. Clonar el repositorio
 
 ```bash
-git clone https://github.com/tu-usuario/chatbot-dmc.git
-cd chatbot-dmc
+git clone https://github.com/roxsiu/chatbot_curso2.git
+cd chatbot_curso2
 ```
 
 ### 2. Instalar dependencias
@@ -129,7 +129,7 @@ chatbot-dmc/
 
 - Python 3.9+
 - LangChain
-- OpenAI (GPT-4o-mini + text-embedding-3-small)
+- OpenAI (gpt-5.4-mini + text-embedding-3-large)
 - ChromaDB
 - PyPDF
 
