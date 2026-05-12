@@ -18,9 +18,9 @@ Usuario → Validación de seguridad → Búsqueda semántica (ChromaDB) → LLM
 | Componente | Tecnología | Descripción |
 |---|---|---|
 | Framework | LangChain | Orquestación de la pipeline RAG |
-| Embeddings | OpenAI (text-embedding-3-small) | Vectorización de textos |
+| Embeddings | OpenAI (text-embedding-3-large) | Vectorización de textos |
 | Vector Store | ChromaDB | Almacenamiento y búsqueda de vectores |
-| LLM | OpenAI (gpt-4o-mini) | Generación de respuestas |
+| LLM | OpenAI (gpt-5.4-mini) | Generación de respuestas |
 | Carga de PDFs | PyPDF + LangChain | Extracción de texto de documentos |
 
 ### Diagrama de arquitectura
