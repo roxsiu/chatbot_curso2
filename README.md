@@ -113,8 +113,8 @@ chatbot-dmc/
 ├── .env                   # Variables de entorno (API Key)
 ├── README.md              # Esta documentación
 └── pdfs/                  # Carpeta con PDFs de DMC
-    ├── brochure_diploma_AIE_2.pdf
-    └── brochure_diploma_DE_6.pdf
+    ├── brochure_diploma_AIE.pdf
+    └── brochure_diploma_DE.pdf
 ```
 
 ## Funcionalidades
